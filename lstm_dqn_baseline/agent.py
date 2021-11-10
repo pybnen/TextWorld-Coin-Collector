@@ -10,9 +10,6 @@ from helpers.model import LSTM_DQN
 from helpers.generic import to_np, to_pt, preproc, _words_to_ids, pad_sequences, max_len
 logger = logging.getLogger(__name__)
 
-import gym
-import gym_textworld  # Register all textworld environments.
-
 
 Transition = namedtuple('Transition', ('observation_id_list', 'c_idx',
                                        'reward', 'mask', 'done',
@@ -163,6 +160,7 @@ class RLAgent(object):
     def choose_random_command(self, command_rank):
         batch_size = command_rank.size(0)
         cr = to_np(command_rank)
+        
         c_idx = []
         for i in range(batch_size):
             c_idx.append(np.random.choice(len(cr[i]), 1)[0])

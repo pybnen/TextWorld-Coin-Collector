@@ -99,7 +99,6 @@ def train(config):
     for i, w in enumerate(word_vocab):
         word2id[w] = i
         
-    
     commands_files = config["general"]["commands_files"]
     commands = get_commands(commands_files)
 
@@ -159,11 +158,10 @@ def train(config):
 
         dones = [False] * batch_size
         rewards = None
+        avg_loss_in_this_game = []
         
         scores = np.array([0] * len(obs))
         max_scores = np.array(infos["max_score"])
-        
-        avg_loss_in_this_game = []
 
         new_observation_strings = agent.get_observation_strings(infos)
         if revisit_counting:
@@ -197,7 +195,7 @@ def train(config):
             agent.revisit_counting_rewards.append(revisit_counting_rewards)
             revisit_counting_rewards = [float(format(item, ".3f")) for item in revisit_counting_rewards]
 
-            for i in range(len(infos)):
+            for i in range(len(obs)):
                 print_command_string[i].append(chosen_strings[i])
                 print_rewards[i].append(rewards[i])
                 print_interm_rewards[i].append(infos["intermediate_reward"][i])
@@ -269,7 +267,7 @@ def train(config):
         summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
         summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
         summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
-
+        summary.add_scalar('epsilon', epsilon, training_steps)
 
         msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
         msg = msg.format(epoch, training_steps,
