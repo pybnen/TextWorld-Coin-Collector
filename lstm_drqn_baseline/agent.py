@@ -11,12 +11,10 @@ from helpers.model import LSTM_DQN
 from helpers.generic import to_np, to_pt, preproc, _words_to_ids, pad_sequences, max_len
 logger = logging.getLogger(__name__)
 
-import gym
-import gym_textworld  # Register all textworld environments.
 
-
-Transition = namedtuple('Transition', ('observation_id_list', 'v_idx', 'n_idx',
-                                       'reward', 'mask', 'done', 'is_final', 'observation_str'))
+Transition = namedtuple('Transition', ('observation_id_list', 'c_idx',
+                                       'reward', 'mask', 'done',
+                                       'is_final', 'observation_str'))
 
 
 class ReplayMemory(object):
@@ -158,21 +156,19 @@ class ObservationHistoryCache(object):
 
 
 class RLAgent(object):
-    def __init__(self, config, word_vocab, verb_map, noun_map, replay_memory_capacity=100000, replay_memory_priority_fraction=0.0, load_pretrained=False):
+    def __init__(self, config, word_vocab, commands, replay_memory_capacity=100000, replay_memory_priority_fraction=0.0, load_pretrained=False):
         # print('Creating RL agent...')
         self.use_dropout_exploration = True  # TODO: move to config.
         self.config = config
         self.use_cuda = config['general']['use_cuda']
         self.word_vocab = word_vocab
-        self.verb_map = verb_map
-        self.noun_map = noun_map
+        self.commands = commands
         self.word2id = {}
         for i, w in enumerate(word_vocab):
             self.word2id[w] = i
         self.model = LSTM_DQN(model_config=config["model"],
                               word_vocab=self.word_vocab,
-                              verb_map=verb_map,
-                              noun_map=noun_map,
+                              commands=commands,
                               enable_cuda=self.use_cuda)
         self.action_scorer_hidden_dim = config['model']['lstm_dqn']['action_scorer_hidden_dim']
         if load_pretrained:
@@ -200,57 +196,53 @@ class RLAgent(object):
         self.dones = []
         self.intermediate_rewards = []
         self.revisit_counting_rewards = []
+        self.scores = []
         self.observation_cache.reset()
 
-    def get_chosen_strings(self, v_idx, n_idx):
-        v_idx_np = to_np(v_idx)
-        n_idx_np = to_np(n_idx)
+    def get_chosen_strings(self, c_idx):
+        c_idx_np = to_np(c_idx)
         res_str = []
-        for i in range(n_idx_np.shape[0]):
-            v, n = self.verb_map[v_idx_np[i]], self.noun_map[n_idx_np[i]]
-            res_str.append(self.word_vocab[v] + " " + self.word_vocab[n])
+        for i in range(c_idx_np.shape[0]):
+            res_str.append(self.commands[c_idx_np[i]])
         return res_str
 
-    def choose_random_command(self, verb_rank, noun_rank):
-        batch_size = verb_rank.size(0)
-        vr, nr = to_np(verb_rank), to_np(noun_rank)
+    def choose_random_command(self, command_rank):
+        batch_size = command_rank.size(0)
+        cr = to_np(command_rank)
 
-        v_idx, n_idx = [], []
+        c_idx = []
         for i in range(batch_size):
-            v_idx.append(np.random.choice(len(vr[i]), 1)[0])
-            n_idx.append(np.random.choice(len(nr[i]), 1)[0])
-        v_qvalue, n_qvalue = [], []
+            c_idx.append(np.random.choice(len(cr[i]), 1)[0])
+        c_qvalue = []
         for i in range(batch_size):
-            v_qvalue.append(verb_rank[i][v_idx[i]])
-            n_qvalue.append(noun_rank[i][n_idx[i]])
-        v_qvalue, n_qvalue = torch.stack(v_qvalue), torch.stack(n_qvalue)
-        v_idx, n_idx = to_pt(np.array(v_idx), self.use_cuda), to_pt(np.array(n_idx), self.use_cuda)
-        return v_qvalue, v_idx, n_qvalue, n_idx
+            c_qvalue.append(command_rank[i][c_idx[i]])
+        c_qvalue = torch.stack(c_qvalue)
+        c_idx = to_pt(np.array(c_idx), self.use_cuda)
+        return c_qvalue, c_idx
 
-    def choose_maxQ_command(self, verb_rank, noun_rank):
-        batch_size = verb_rank.size(0)
-        vr, nr = to_np(verb_rank), to_np(noun_rank)
-        v_idx = np.argmax(vr, -1)
-        n_idx = np.argmax(nr, -1)
-        v_qvalue, n_qvalue = [], []
+    def choose_maxQ_command(self, command_rank):
+        batch_size = command_rank.size(0)
+        cr = to_np(command_rank)
+        c_idx = np.argmax(cr, -1)
+        c_qvalue = []
         for i in range(batch_size):
-            v_qvalue.append(verb_rank[i][v_idx[i]])
-            n_qvalue.append(noun_rank[i][n_idx[i]])
-        v_qvalue, n_qvalue = torch.stack(v_qvalue), torch.stack(n_qvalue)
-        v_idx, n_idx = to_pt(v_idx, self.use_cuda), to_pt(n_idx, self.use_cuda)
-        return v_qvalue, v_idx, n_qvalue, n_idx
+            c_qvalue.append(command_rank[i][c_idx[i]])
+        c_qvalue = torch.stack(c_qvalue)
+        c_idx = to_pt(c_idx, self.use_cuda)
+        return c_qvalue, c_idx
 
     def get_ranks(self, input_description, prev_hidden=None, prev_cell=None):
         state_representation = self.model.representation_generator(input_description)
-        verb_rank, noun_rank, curr_hidden, curr_cell = self.model.recurrent_action_scorer(state_representation, prev_hidden, prev_cell)
-        return verb_rank, noun_rank, curr_hidden, curr_cell
+        command_rank, curr_hidden, curr_cell = self.model.recurrent_action_scorer(state_representation, prev_hidden, prev_cell)
+        
+        return command_rank, curr_hidden, curr_cell
 
     def generate_one_command(self, input_description, prev_hidden=None, prev_cell=None, epsilon=0.2):
-        verb_rank, noun_rank, curr_hidden, curr_cell = self.get_ranks(input_description, prev_hidden, prev_cell)  # batch x n_verb, batch x n_noun
+        command_rank, curr_hidden, curr_cell = self.get_ranks(input_description, prev_hidden, prev_cell)  # batch x n_verb, batch x n_noun
         curr_hidden = curr_hidden.detach()
         curr_cell = curr_cell.detach()
-        v_qvalue_maxq, v_idx_maxq, n_qvalue_maxq, n_idx_maxq = self.choose_maxQ_command(verb_rank, noun_rank)
-        v_qvalue_random, v_idx_random, n_qvalue_random, n_idx_random = self.choose_random_command(verb_rank, noun_rank)
+        c_qvalue_maxq, c_idx_maxq = self.choose_maxQ_command(command_rank)
+        c_qvalue_random, c_idx_random = self.choose_random_command(command_rank)
 
         # random number for epsilon greedy
         rand_num = np.random.uniform(low=0.0, high=1.0, size=(input_description.size(0),))
@@ -259,26 +251,25 @@ class RLAgent(object):
         less_than_epsilon = to_pt(less_than_epsilon, self.use_cuda, type='float')
         greater_than_epsilon = to_pt(greater_than_epsilon, self.use_cuda, type='float')
         less_than_epsilon, greater_than_epsilon = less_than_epsilon.long(), greater_than_epsilon.long()
-        v_idx = less_than_epsilon * v_idx_random + greater_than_epsilon * v_idx_maxq
-        n_idx = less_than_epsilon * n_idx_random + greater_than_epsilon * n_idx_maxq
-        v_idx, n_idx = v_idx.detach(), n_idx.detach()
+        c_idx = less_than_epsilon * c_idx_random + greater_than_epsilon * c_idx_maxq
+        c_idx = c_idx.detach()
 
-        chosen_strings = self.get_chosen_strings(v_idx, n_idx)
+        chosen_strings = self.get_chosen_strings(c_idx)
 
-        return v_idx, n_idx, chosen_strings, curr_hidden, curr_cell
+        return c_idx, chosen_strings, curr_hidden, curr_cell
 
     def get_game_step_info(self, ob, infos, prev_actions=None):
         # concat d/i/q/f together as one string
 
-        inventory_strings = [info["inventory"] for info in infos]
+        inventory_strings = infos["inventory"]
         inventory_token_list = [preproc(item, str_type='inventory', lower_case=True) for item in inventory_strings]
         inventory_id_list = [_words_to_ids(tokens, self.word2id) for tokens in inventory_token_list]
 
-        feedback_strings = [info["command_feedback"] for info in infos]
+        feedback_strings = infos["feedback"]
         feedback_token_list = [preproc(item, str_type='feedback', lower_case=True) for item in feedback_strings]
         feedback_id_list = [_words_to_ids(tokens, self.word2id) for tokens in feedback_token_list]
 
-        quest_strings = [info["objective"] for info in infos]
+        quest_strings = infos["objective"]
         quest_token_list = [preproc(item, str_type='None', lower_case=True) for item in quest_strings]
         quest_id_list = [_words_to_ids(tokens, self.word2id) for tokens in quest_token_list]
 
@@ -286,9 +277,9 @@ class RLAgent(object):
             prev_action_token_list = [preproc(item, str_type='None', lower_case=True) for item in prev_actions]
             prev_action_id_list = [_words_to_ids(tokens, self.word2id) for tokens in prev_action_token_list]
         else:
-            prev_action_id_list = [[] for _ in infos]
+            prev_action_id_list = [[] for _ in infos["inventory"]]
 
-        description_strings = [info["description"] for info in infos]
+        description_strings = infos["description"]
         description_token_list = [preproc(item, str_type='description', lower_case=True) for item in description_strings]
         for i, d in enumerate(description_token_list):
             if len(d) == 0:
@@ -306,9 +297,9 @@ class RLAgent(object):
 
     def get_observation_strings(self, infos):
         # concat game_id_d/i/q together as one string
-        game_file_names = [info["game_file"] for info in infos]
-        inventory_strings = [info["inventory"] for info in infos]
-        description_strings = [info["description"] for info in infos]
+        game_file_names = ["" for _ in infos["inventory"]]  # [info["game_file"] for info in infos]
+        inventory_strings = infos["inventory"]
+        description_strings = infos["description"]
 
         observation_strings = [_n + _d + _i for (_n, _d, _i) in zip(game_file_names, description_strings, inventory_strings)]
 
@@ -353,30 +344,34 @@ class RLAgent(object):
         prev_ras_hidden, prev_ras_cell = None, None  # ras: recurrent action scorer
         observation_id_list = pad_sequences(sequences[0].observation_id_list, maxlen=max_len(sequences[0].observation_id_list), padding='post').astype('int32')
         input_observation = to_pt(observation_id_list, self.use_cuda)
-        v_idx = torch.stack(sequences[0].v_idx, 0)  # batch x 1
-        n_idx = torch.stack(sequences[0].n_idx, 0)  # batch x 1
-        verb_rank, noun_rank, curr_ras_hidden, curr_ras_cell = self.get_ranks(input_observation, prev_ras_hidden, prev_ras_cell)
-        v_qvalue, n_qvalue = verb_rank.gather(1, v_idx.unsqueeze(-1)).squeeze(-1), noun_rank.gather(1, n_idx.unsqueeze(-1)).squeeze(-1)  # batch
-        prev_qvalue = torch.mean(torch.stack([v_qvalue, n_qvalue], -1), -1)  # batch
+        c_idx = torch.stack(sequences[0].c_idx, 0)  # batch x 1
+        
+        command_rank, curr_ras_hidden, curr_ras_cell = self.get_ranks(input_observation, prev_ras_hidden, prev_ras_cell)
+        
+        c_qvalue = command_rank.gather(1, c_idx.unsqueeze(-1)).squeeze(-1)  # batch
+        prev_qvalue = c_qvalue # torch.mean(torch.stack([v_qvalue, n_qvalue], -1), -1)  # batch
+        
         if update_from > 0:
             prev_qvalue, curr_ras_hidden, curr_ras_cell = prev_qvalue.detach(), curr_ras_hidden.detach(), curr_ras_cell.detach()
 
         for i in range(1, len(sequences)):
             observation_id_list = pad_sequences(sequences[i].observation_id_list, maxlen=max_len(sequences[i].observation_id_list), padding='post').astype('int32')
             input_observation = to_pt(observation_id_list, self.use_cuda)
-            v_idx = torch.stack(sequences[i].v_idx, 0)  # batch x 1
-            n_idx = torch.stack(sequences[i].n_idx, 0)  # batch x 1
+            c_idx = torch.stack(sequences[i].c_idx, 0)  # batch x 1
 
-            verb_rank, noun_rank, curr_ras_hidden, curr_ras_cell = self.get_ranks(input_observation, curr_ras_hidden, curr_ras_cell)
+            command_rank, curr_ras_hidden, curr_ras_cell = self.get_ranks(input_observation, curr_ras_hidden, curr_ras_cell)
+            
             # max
-            v_qvalue_max, _, n_qvalue_max, _ = self.choose_maxQ_command(verb_rank, noun_rank)
-            q_value_max = torch.mean(torch.stack([v_qvalue_max, n_qvalue_max], -1), -1)  # batch
+            c_qvalue_max, _ = self.choose_maxQ_command(command_rank)
+            q_value_max = c_qvalue_max # torch.mean(torch.stack([v_qvalue_max, n_qvalue_max], -1), -1)  # batch
             q_value_max = q_value_max.detach()
+            
             # from memory
-            v_qvalue, n_qvalue = verb_rank.gather(1, v_idx.unsqueeze(-1)).squeeze(-1), noun_rank.gather(1, n_idx.unsqueeze(-1)).squeeze(-1)  # batch
-            q_value = torch.mean(torch.stack([v_qvalue, n_qvalue], -1), -1)  # batch
+            c_qvalue = command_rank.gather(1, c_idx.unsqueeze(-1)).squeeze(-1)  # batch
+            q_value = c_qvalue  # batch
             if i < update_from or i == len(sequences) - 1:
                 q_value, curr_ras_hidden, curr_ras_cell = q_value.detach(), curr_ras_hidden.detach(), curr_ras_cell.detach()
+            
             if i > update_from:
                 prev_rewards = torch.stack(sequences[i - 1].reward)  # batch
                 prev_not_done = 1.0 - np.array(sequences[i - 1].done, dtype='float32')  # batch
@@ -392,6 +387,7 @@ class RLAgent(object):
     def finish(self):
         # Game has finished.
         # this function does nothing, bust compute values that to be printed out
+        self.final_scores = np.array(self.scores[-1], dtype='float32') # batch
         self.final_rewards = np.array(self.rewards[-1], dtype='float32')  # batch
         self.final_counting_rewards = np.sum(np.array(self.revisit_counting_rewards), 0)  # batch
         dones = []

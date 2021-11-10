@@ -9,7 +9,7 @@ import sys
 sys.path.append(sys.path[0] + "/..")
 
 import torch
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from agent import RLAgent
 
 from helpers.generic import SlidingAverage, to_np
@@ -19,40 +19,61 @@ from test_agent import test
 logger = logging.getLogger(__name__)
 
 import gym
-import gym_textworld  # Register all textworld environments.
-
 import textworld
+import textworld.gym
+
+
+def request_infos():
+    """Request the infos the agent expects from the environment
+
+    Returns:
+        request_infos: EnvInfos"""
+    request_infos = textworld.EnvInfos()
+    request_infos.description = True
+    request_infos.inventory = True
+    request_infos.entities = True
+    request_infos.verbs = True
+    request_infos.admissible_commands = True
+    request_infos.command_templates = True
+    request_infos.max_score = True
+    request_infos.intermediate_reward = True
+    request_infos.objective = True
+    request_infos.feedback = True
+    return request_infos
+
+
+def get_commands(commands_files):
+    commands = []
+    for command_file in commands_files:
+        with open(command_file, "r") as fp:
+            for line in fp:
+                line = line.strip()
+                if len(line) > 0:
+                    commands.append(line)
+    return list(dict.fromkeys(commands))
+
+
+def get_word_vocab(vocab_file):
+    with open(vocab_file) as fp:
+        word_vocab = fp.read().split("\n")
+    return word_vocab
 
 
 def train(config):
     # train env
     print('Setting up TextWorld environment...')
     batch_size = config['training']['scheduling']['batch_size']
-    env_id = gym_textworld.make_batch(env_id=config['general']['env_id'],
-                                      batch_size=batch_size,
-                                      parallel=True)
+    
+    requested_infos = request_infos()
+    game_files = config['general']['game_files']
+    env_id = textworld.gym.register_games(game_files,
+                                          requested_infos,
+                                          batch_size=batch_size,
+                                          asynchronous=True, auto_reset=False,
+                                          max_episode_steps=50, # used in the original implementation
+                                          name="training")
     env = gym.make(env_id)
     env.seed(config['general']['random_seed'])
-
-    # valid and test env
-    run_test = config['general']['run_test']
-    if run_test:
-        test_batch_size = config['training']['scheduling']['test_batch_size']
-        # valid
-        valid_env_name = config['general']['valid_env_id']
-
-        valid_env_id = gym_textworld.make_batch(env_id=valid_env_name, batch_size=test_batch_size, parallel=True)
-        valid_env = gym.make(valid_env_id)
-        valid_env.seed(config['general']['random_seed'])
-
-        # test
-        test_env_name_list = config['general']['test_env_id']
-        assert isinstance(test_env_name_list, list)
-
-        test_env_id_list = [gym_textworld.make_batch(env_id=item, batch_size=test_batch_size, parallel=True) for item in test_env_name_list]
-        test_env_list = [gym.make(test_env_id) for test_env_id in test_env_id_list]
-        for i in range(len(test_env_list)):
-            test_env_list[i].seed(config['general']['random_seed'])
     print('Done.')
 
     # Set the random seed manually for reproducibility.
@@ -66,6 +87,7 @@ def train(config):
             torch.cuda.manual_seed(config['general']['random_seed'])
     else:
         config['general']['use_cuda'] = False  # Disable CUDA.
+        
     revisit_counting = config['general']['revisit_counting']
     replay_batch_size = config['general']['replay_batch_size']
     history_size = config['general']['history_size']
@@ -73,18 +95,16 @@ def train(config):
     replay_memory_capacity = config['general']['replay_memory_capacity']
     replay_memory_priority_fraction = config['general']['replay_memory_priority_fraction']
 
-    word_vocab = dict2list(env.observation_space.id2w)
+    vocab_file = config["general"]["vocab_file"]
+    word_vocab = get_word_vocab(vocab_file)
     word2id = {}
     for i, w in enumerate(word_vocab):
         word2id[w] = i
+        
+    commands_files = config["general"]["commands_files"]
+    commands = get_commands(commands_files)
 
-    # collect all nouns
-    # verb_list, object_name_list = get_verb_and_object_name_lists(env)
-    verb_list = ["go", "take"]
-    object_name_list = ["east", "west", "north", "south", "coin"]
-    verb_map = [word2id[w] for w in verb_list if w in word2id]
-    noun_map = [word2id[w] for w in object_name_list if w in word2id]
-    agent = RLAgent(config, word_vocab, verb_map, noun_map,
+    agent = RLAgent(config, word_vocab, commands,
                     replay_memory_capacity=replay_memory_capacity, replay_memory_priority_fraction=replay_memory_priority_fraction)
 
     init_learning_rate = config['training']['optimizer']['learning_rate']
@@ -101,6 +121,7 @@ def train(config):
     reward_avg = SlidingAverage('reward avg', steps=log_every)
     step_avg = SlidingAverage('step avg', steps=log_every)
     loss_avg = SlidingAverage('loss avg', steps=log_every)
+    score_avg = SlidingAverage('scores avgs', steps=log_every)
 
     # save & reload checkpoint only in 0th agent
     best_avg_reward = -10000
@@ -122,18 +143,26 @@ def train(config):
 
     epsilon = epsilon_anneal_from
     revisit_counting_lambda = revisit_counting_lambda_anneal_from
-    for epoch in range(config['training']['scheduling']['epoch']):
-
+    
+    max_training_steps = config['training']['scheduling']['training_steps']
+    training_steps = 0
+    epoch = 0
+    
+    while training_steps < max_training_steps:
+    # for epoch in range(config['training']['scheduling']['epoch']):
         agent.model.train()
         obs, infos = env.reset()
         agent.reset(infos)
-        print_command_string, print_rewards = [[] for _ in infos], [[] for _ in infos]
-        print_interm_rewards = [[] for _ in infos]
-        print_rc_rewards = [[] for _ in infos]
+        print_command_string, print_rewards = [[] for _ in obs], [[] for _ in obs]
+        print_interm_rewards = [[] for _ in obs]
+        print_rc_rewards = [[] for _ in obs]
 
         dones = [False] * batch_size
         rewards = None
         avg_loss_in_this_game = []
+        
+        scores = np.array([0] * len(obs))
+        max_scores = np.array(infos["max_score"])
 
         curr_observation_strings = agent.get_observation_strings(infos)
         if revisit_counting:
@@ -149,8 +178,16 @@ def train(config):
 
         while not all(dones):
             agent.model.train()
-            v_idx, n_idx, chosen_strings, curr_ras_hidden, curr_ras_cell = agent.generate_one_command(input_description, curr_ras_hidden, curr_ras_cell, epsilon=epsilon)
-            obs, rewards, dones, infos = env.step(chosen_strings)
+            c_idx, chosen_strings, curr_ras_hidden, curr_ras_cell = agent.generate_one_command(input_description, curr_ras_hidden, curr_ras_cell, epsilon=epsilon)
+            old_scores = scores
+            obs, scores, dones, infos = env.step(chosen_strings)
+            
+            # calculate immediate reward from scores and normalize it
+            rewards = (np.array(scores) - old_scores) / max_scores
+            rewards = np.array(rewards, dtype=np.float32)
+            
+            training_steps += sum([int(not finished) for finished in dones])
+            
             curr_observation_strings = agent.get_observation_strings(infos)
             if provide_prev_action:
                 prev_actions = chosen_strings
@@ -162,16 +199,17 @@ def train(config):
             agent.revisit_counting_rewards.append(revisit_counting_rewards)
             revisit_counting_rewards = [float(format(item, ".3f")) for item in revisit_counting_rewards]
 
-            for i in range(len(infos)):
+            for i in range(len(obs)):
                 print_command_string[i].append(chosen_strings[i])
                 print_rewards[i].append(rewards[i])
-                print_interm_rewards[i].append(infos[i]["intermediate_reward"])
+                print_interm_rewards[i].append(infos["intermediate_reward"][i])
                 print_rc_rewards[i].append(revisit_counting_rewards[i])
             if type(dones) is bool:
                 dones = [dones] * batch_size
             agent.rewards.append(rewards)
             agent.dones.append(dones)
-            agent.intermediate_rewards.append([info["intermediate_reward"] for info in infos])
+            agent.intermediate_rewards.append(infos["intermediate_reward"])
+            agent.scores.append(scores)
             # computer rewards, and push into replay memory
             rewards_np, rewards_pt, mask_np, mask_pt, memory_mask = agent.compute_reward(revisit_counting_lambda=revisit_counting_lambda, revisit_counting=revisit_counting)
 
@@ -189,7 +227,7 @@ def train(config):
                 if rewards[b] > 0.0:
                     solved[b] = 1
                 # replay memory
-                memory_cache[b].append((curr_description_id_list[b], v_idx[b], n_idx[b], rewards_pt[b], mask_pt[b], dones[b], is_final, curr_observation_strings[b]))
+                memory_cache[b].append((curr_description_id_list[b], c_idx[b], rewards_pt[b], mask_pt[b], dones[b], is_final, curr_observation_strings[b]))
 
             if current_game_step > 0 and current_game_step % config["general"]["update_per_k_game_steps"] == 0:
                 policy_loss = agent.update(replay_batch_size, history_size, update_from, discount_gamma=discount_gamma)
@@ -204,6 +242,9 @@ def train(config):
                 optimizer.step()  # apply gradients
                 avg_loss_in_this_game.append(to_np(policy_loss))
             current_game_step += 1
+            
+            if training_steps >= max_training_steps:
+                break
 
         for i, mc in enumerate(memory_cache):
             for item in mc:
@@ -219,6 +260,8 @@ def train(config):
         reward_avg.add(agent.final_rewards.mean())
         step_avg.add(agent.step_used_before_done.mean())
         loss_avg.add(avg_loss_in_this_game)
+        score_avg.add(agent.final_scores.mean())
+        
         # annealing
         if epoch < epsilon_anneal_epochs:
             epsilon -= (epsilon_anneal_from - epsilon_anneal_to) / float(epsilon_anneal_epochs)
@@ -227,51 +270,27 @@ def train(config):
 
         # Tensorboard logging #
         # (1) Log some numbers
-        if (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            summary.add_scalar('avg_reward', reward_avg.value, epoch + 1)
-            summary.add_scalar('curr_reward', agent.final_rewards.mean(), epoch + 1)
-            summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), epoch + 1)
-            summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), epoch + 1)
-            summary.add_scalar('avg_step', step_avg.value, epoch + 1)
-            summary.add_scalar('curr_step', agent.step_used_before_done.mean(), epoch + 1)
-            summary.add_scalar('loss_avg', loss_avg.value, epoch + 1)
-            summary.add_scalar('curr_loss', avg_loss_in_this_game, epoch + 1)
+        summary.add_scalar('avg_reward', reward_avg.value, training_steps)
+        summary.add_scalar('curr_reward', agent.final_rewards.mean(), training_steps)
+        summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), training_steps)
+        summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), training_steps)
+        summary.add_scalar('avg_step', step_avg.value, training_steps)
+        summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
+        summary.add_scalar('loss_avg', loss_avg.value, training_steps)
+        summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
+        summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
+        summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
+        summary.add_scalar('epsilon', epsilon, training_steps)
 
-        msg = 'E#{:03d}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
-        msg = msg.format(epoch,
+        msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
+        msg = msg.format(epoch, training_steps,
                          np.mean(reward_avg.value), agent.final_rewards.mean(), agent.final_intermediate_rewards.mean(), agent.final_counting_rewards.mean(),
+                         score_avg.value / max_scores[0], agent.final_scores.mean() / max_scores[0],
                          np.mean(step_avg.value), agent.step_used_before_done.mean(),
                          np.mean(loss_avg.value), avg_loss_in_this_game,
                          epsilon, revisit_counting_lambda)
-        if (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            print("=========================================================")
-            for prt_cmd, prt_rew, prt_int_rew, prt_rc_rew in zip(print_command_string, print_rewards, print_interm_rewards, print_rc_rewards):
-                print("------------------------------")
-                print(prt_cmd)
-                print(prt_rew)
-                print(prt_int_rew)
-                print(prt_rc_rew)
         print(msg)
-        # test on a different set of games
-        if run_test and (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            valid_R, valid_IR, valid_S = test(config, valid_env, agent, test_batch_size, word2id)
-            summary.add_scalar('valid_reward', valid_R, epoch + 1)
-            summary.add_scalar('valid_interm_reward', valid_IR, epoch + 1)
-            summary.add_scalar('valid_step', valid_S, epoch + 1)
-
-            # save & reload checkpoint by best valid performance
-            model_checkpoint_path = config['training']['scheduling']['model_checkpoint_path']
-            if valid_R > best_avg_reward or (valid_R == best_avg_reward and valid_S < best_avg_step):
-                best_avg_reward = valid_R
-                best_avg_step = valid_S
-                torch.save(agent.model.state_dict(), model_checkpoint_path)
-                print("========= saved checkpoint =========")
-                for test_id in range(len(test_env_list)):
-                    R, IR, S = test(config, test_env_list[test_id], agent, test_batch_size, word2id)
-                    summary.add_scalar('test_reward_' + str(test_id), R, epoch + 1)
-                    summary.add_scalar('test_interm_reward_' + str(test_id), IR, epoch + 1)
-                    summary.add_scalar('test_step_' + str(test_id), S, epoch + 1)
-
+        epoch += 1
 
 if __name__ == '__main__':
     for _p in ['saved_models']:
