@@ -67,10 +67,9 @@ def to_pt(np_matrix, enable_cuda=False, type='long'):
 
 
 def get_experiment_dir(config):
-    env_id = config['general']['env_id']
     exps_dir = config['general']['experiments_dir']
     exp_tag = config['general']['experiment_tag']
-    exp_dir = pjoin(exps_dir, env_id + "_" + exp_tag)
+    exp_dir = pjoin(exps_dir, exp_tag)
     return maybe_mkdir(exp_dir)
 
 

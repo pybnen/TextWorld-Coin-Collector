@@ -9,7 +9,7 @@ import sys
 sys.path.append(sys.path[0] + "/..")
 
 import torch
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from agent import RLAgent
 
 from helpers.generic import SlidingAverage, to_np
@@ -19,40 +19,61 @@ from test_agent import test
 logger = logging.getLogger(__name__)
 
 import gym
-import gym_textworld  # Register all textworld environments.
-
 import textworld
+import textworld.gym
+
+
+def request_infos():
+    """Request the infos the agent expects from the environment
+
+    Returns:
+        request_infos: EnvInfos"""
+    request_infos = textworld.EnvInfos()
+    request_infos.description = True
+    request_infos.inventory = True
+    request_infos.entities = True
+    request_infos.verbs = True
+    request_infos.admissible_commands = True
+    request_infos.command_templates = True
+    request_infos.max_score = True
+    request_infos.intermediate_reward = True
+    request_infos.objective = True
+    request_infos.feedback = True
+    return request_infos
+
+
+def get_commands(commands_files):
+    commands = []
+    for command_file in commands_files:
+        with open(command_file, "r") as fp:
+            for line in fp:
+                line = line.strip()
+                if len(line) > 0:
+                    commands.append(line)
+    return list(dict.fromkeys(commands))
+
+
+def get_word_vocab(vocab_file):
+    with open(vocab_file) as fp:
+        word_vocab = fp.read().split("\n")
+    return word_vocab
 
 
 def train(config):
     # train env
     print('Setting up TextWorld environment...')
     batch_size = config['training']['scheduling']['batch_size']
-    env_id = gym_textworld.make_batch(env_id=config['general']['env_id'],
-                                      batch_size=batch_size,
-                                      parallel=True)
+    
+    requested_infos = request_infos()
+    game_files = config['general']['game_files']
+    env_id = textworld.gym.register_games(game_files,
+                                          requested_infos,
+                                          batch_size=batch_size,
+                                          asynchronous=True, auto_reset=False,
+                                          max_episode_steps=50, # used in the original implementation
+                                          name="training")
     env = gym.make(env_id)
     env.seed(config['general']['random_seed'])
-
-    # valid and test env
-    run_test = config['general']['run_test']
-    if run_test:
-        test_batch_size = config['training']['scheduling']['test_batch_size']
-        # valid
-        valid_env_name = config['general']['valid_env_id']
-
-        valid_env_id = gym_textworld.make_batch(env_id=valid_env_name, batch_size=test_batch_size, parallel=True)
-        valid_env = gym.make(valid_env_id)
-        valid_env.seed(config['general']['random_seed'])
-
-        # test
-        test_env_name_list = config['general']['test_env_id']
-        assert isinstance(test_env_name_list, list)
-
-        test_env_id_list = [gym_textworld.make_batch(env_id=item, batch_size=test_batch_size, parallel=True) for item in test_env_name_list]
-        test_env_list = [gym.make(test_env_id) for test_env_id in test_env_id_list]
-        for i in range(len(test_env_list)):
-            test_env_list[i].seed(config['general']['random_seed'])
     print('Done.')
 
     # Set the random seed manually for reproducibility.
@@ -66,22 +87,23 @@ def train(config):
             torch.cuda.manual_seed(config['general']['random_seed'])
     else:
         config['general']['use_cuda'] = False  # Disable CUDA.
+        
     revisit_counting = config['general']['revisit_counting']
     replay_batch_size = config['general']['replay_batch_size']
     replay_memory_capacity = config['general']['replay_memory_capacity']
     replay_memory_priority_fraction = config['general']['replay_memory_priority_fraction']
 
-    word_vocab = dict2list(env.observation_space.id2w)
+    vocab_file = config["general"]["vocab_file"]
+    word_vocab = get_word_vocab(vocab_file)
     word2id = {}
     for i, w in enumerate(word_vocab):
         word2id[w] = i
+        
+    
+    commands_files = config["general"]["commands_files"]
+    commands = get_commands(commands_files)
 
-    # collect all nouns
-    verb_list = ["go", "take"]
-    object_name_list = ["east", "west", "north", "south", "coin"]
-    verb_map = [word2id[w] for w in verb_list if w in word2id]
-    noun_map = [word2id[w] for w in object_name_list if w in word2id]
-    agent = RLAgent(config, word_vocab, verb_map, noun_map,
+    agent = RLAgent(config, word_vocab, commands,
                     replay_memory_capacity=replay_memory_capacity, replay_memory_priority_fraction=replay_memory_priority_fraction)
 
     init_learning_rate = config['training']['optimizer']['learning_rate']
@@ -144,7 +166,7 @@ def train(config):
 
         while not all(dones):
 
-            v_idx, n_idx, chosen_strings, state_representation = agent.generate_one_command(input_description, epsilon=epsilon)
+            c_idx, chosen_strings, state_representation = agent.generate_one_command(input_description, epsilon=epsilon)
             obs, rewards, dones, infos = env.step(chosen_strings)
             new_observation_strings = agent.get_observation_strings(infos)
             if provide_prev_action:
@@ -160,13 +182,13 @@ def train(config):
             for i in range(len(infos)):
                 print_command_string[i].append(chosen_strings[i])
                 print_rewards[i].append(rewards[i])
-                print_interm_rewards[i].append(infos[i]["intermediate_reward"])
+                print_interm_rewards[i].append(infos["intermediate_reward"][i])
                 print_rc_rewards[i].append(revisit_counting_rewards[i])
             if type(dones) is bool:
                 dones = [dones] * batch_size
             agent.rewards.append(rewards)
             agent.dones.append(dones)
-            agent.intermediate_rewards.append([info["intermediate_reward"] for info in infos])
+            agent.intermediate_rewards.append(infos["intermediate_reward"])
             # computer rewards, and push into replay memory
             rewards_np, rewards, mask_np, mask = agent.compute_reward(revisit_counting_lambda=revisit_counting_lambda, revisit_counting=revisit_counting)
 
@@ -178,12 +200,12 @@ def train(config):
                     continue
                 if replay_memory_priority_fraction == 0.0:
                     # vanilla replay memory
-                    agent.replay_memory.push(curr_description_id_list[b], v_idx[b], n_idx[b], rewards[b], mask[b], dones[b],
+                    agent.replay_memory.push(curr_description_id_list[b], c_idx[b], rewards[b], mask[b], dones[b],
                                              description_id_list[b], new_observation_strings[b])
                 else:
                     # prioritized replay memory
                     is_prior = rewards_np[b] > 0.0
-                    agent.replay_memory.push(is_prior, curr_description_id_list[b], v_idx[b], n_idx[b], rewards[b], mask[b], dones[b],
+                    agent.replay_memory.push(is_prior, curr_description_id_list[b], c_idx[b], rewards[b], mask[b], dones[b],
                                              description_id_list[b], new_observation_strings[b])
 
             if current_game_step > 0 and current_game_step % config["general"]["update_per_k_game_steps"] == 0:
@@ -238,25 +260,6 @@ def train(config):
                 print(prt_int_rew)
                 print(prt_rc_rew)
         print(msg)
-        # test on a different set of games
-        if run_test and (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            valid_R, valid_IR, valid_S = test(config, valid_env, agent, test_batch_size, word2id)
-            summary.add_scalar('valid_reward', valid_R, epoch + 1)
-            summary.add_scalar('valid_interm_reward', valid_IR, epoch + 1)
-            summary.add_scalar('valid_step', valid_S, epoch + 1)
-
-            # save & reload checkpoint by best valid performance
-            model_checkpoint_path = config['training']['scheduling']['model_checkpoint_path']
-            if valid_R > best_avg_reward or (valid_R == best_avg_reward and valid_S < best_avg_step):
-                best_avg_reward = valid_R
-                best_avg_step = valid_S
-                torch.save(agent.model.state_dict(), model_checkpoint_path)
-                print("========= saved checkpoint =========")
-                for test_id in range(len(test_env_list)):
-                    R, IR, S = test(config, test_env_list[test_id], agent, test_batch_size, word2id)
-                    summary.add_scalar('test_reward_' + str(test_id), R, epoch + 1)
-                    summary.add_scalar('test_interm_reward_' + str(test_id), IR, epoch + 1)
-                    summary.add_scalar('test_step_' + str(test_id), S, epoch + 1)
 
 
 if __name__ == '__main__':
