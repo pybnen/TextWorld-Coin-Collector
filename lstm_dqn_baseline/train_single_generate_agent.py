@@ -142,8 +142,13 @@ def train(config):
 
     epsilon = epsilon_anneal_from
     revisit_counting_lambda = revisit_counting_lambda_anneal_from
-    for epoch in range(config['training']['scheduling']['epoch']):
-
+    
+    max_training_steps = config['training']['scheduling']['training_steps']
+    training_steps = 0
+    epoch = 0
+    
+    while training_steps < max_training_steps:
+    # for epoch in range(config['training']['scheduling']['epoch']):
         agent.model.train()
         obs, infos = env.reset()
         agent.reset(infos)
@@ -168,6 +173,9 @@ def train(config):
 
             c_idx, chosen_strings, state_representation = agent.generate_one_command(input_description, epsilon=epsilon)
             obs, rewards, dones, infos = env.step(chosen_strings)
+            
+            training_steps += sum([int(not finished) for finished in dones])
+            
             new_observation_strings = agent.get_observation_strings(infos)
             if provide_prev_action:
                 prev_actions = chosen_strings
@@ -221,6 +229,9 @@ def train(config):
                 optimizer.step()  # apply gradients
                 avg_loss_in_this_game.append(to_np(policy_loss))
             current_game_step += 1
+            
+            if training_steps >= max_training_steps:
+                break
 
         agent.finish()
         avg_loss_in_this_game = np.mean(avg_loss_in_this_game)
@@ -235,31 +246,23 @@ def train(config):
 
         # Tensorboard logging #
         # (1) Log some numbers
-        if (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            summary.add_scalar('avg_reward', reward_avg.value, epoch + 1)
-            summary.add_scalar('curr_reward', agent.final_rewards.mean(), epoch + 1)
-            summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), epoch + 1)
-            summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), epoch + 1)
-            summary.add_scalar('avg_step', step_avg.value, epoch + 1)
-            summary.add_scalar('curr_step', agent.step_used_before_done.mean(), epoch + 1)
-            summary.add_scalar('loss_avg', loss_avg.value, epoch + 1)
-            summary.add_scalar('curr_loss', avg_loss_in_this_game, epoch + 1)
+        summary.add_scalar('avg_reward', reward_avg.value, training_steps)
+        summary.add_scalar('curr_reward', agent.final_rewards.mean(), training_steps)
+        summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), training_steps)
+        summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), training_steps)
+        summary.add_scalar('avg_step', step_avg.value, training_steps)
+        summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
+        summary.add_scalar('loss_avg', loss_avg.value, training_steps)
+        summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
 
-        msg = 'E#{:03d}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
-        msg = msg.format(epoch,
+        msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
+        msg = msg.format(epoch, training_steps,
                          np.mean(reward_avg.value), agent.final_rewards.mean(), agent.final_intermediate_rewards.mean(), agent.final_counting_rewards.mean(),
                          np.mean(step_avg.value), agent.step_used_before_done.mean(),
                          np.mean(loss_avg.value), avg_loss_in_this_game,
                          epsilon, revisit_counting_lambda)
-        if (epoch + 1) % config["training"]["scheduling"]["logging_frequency"] == 0:
-            print("=========================================================")
-            for prt_cmd, prt_rew, prt_int_rew, prt_rc_rew in zip(print_command_string, print_rewards, print_interm_rewards, print_rc_rewards):
-                print("------------------------------")
-                print(prt_cmd)
-                print(prt_rew)
-                print(prt_int_rew)
-                print(prt_rc_rew)
         print(msg)
+        epoch += 1
 
 
 if __name__ == '__main__':

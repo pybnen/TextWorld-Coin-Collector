@@ -34,6 +34,7 @@ training:
     batch_size: 10
     test_batch_size: 10
     epoch: 20000
+    training_steps: 1_600_000
     model_checkpoint_path: 'saved_models/model1.pt'
     logging_frequency: 20
 
