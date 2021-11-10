@@ -150,6 +150,7 @@ class RLAgent(object):
         self.dones = []
         self.intermediate_rewards = []
         self.revisit_counting_rewards = []
+        self.scores = []
         self.observation_cache.reset()
 
     def get_chosen_strings(self, c_idx):
@@ -308,6 +309,7 @@ class RLAgent(object):
     def finish(self):
         # Game has finished.
         # this function does nothing, bust compute values that to be printed out
+        self.final_scores = np.array(self.scores[-1], dtype='float32') # batch
         self.final_rewards = np.array(self.rewards[-1], dtype='float32')  # batch
         self.final_counting_rewards = np.sum(np.array(self.revisit_counting_rewards), 0)  # batch
         dones = []

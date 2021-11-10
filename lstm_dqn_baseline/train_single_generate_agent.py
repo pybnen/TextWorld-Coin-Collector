@@ -121,6 +121,7 @@ def train(config):
     reward_avg = SlidingAverage('reward avg', steps=log_every)
     step_avg = SlidingAverage('step avg', steps=log_every)
     loss_avg = SlidingAverage('loss avg', steps=log_every)
+    score_avg = SlidingAverage('scores avgs', steps=log_every)
 
     # save & reload checkpoint only in 0th agent
     best_avg_reward = -10000
@@ -152,12 +153,16 @@ def train(config):
         agent.model.train()
         obs, infos = env.reset()
         agent.reset(infos)
-        print_command_string, print_rewards = [[] for _ in infos], [[] for _ in infos]
-        print_interm_rewards = [[] for _ in infos]
-        print_rc_rewards = [[] for _ in infos]
+        print_command_string, print_rewards = [[] for _ in obs], [[] for _ in obs]
+        print_interm_rewards = [[] for _ in obs]
+        print_rc_rewards = [[] for _ in obs]
 
         dones = [False] * batch_size
         rewards = None
+        
+        scores = np.array([0] * len(obs))
+        max_scores = np.array(infos["max_score"])
+        
         avg_loss_in_this_game = []
 
         new_observation_strings = agent.get_observation_strings(infos)
@@ -172,7 +177,12 @@ def train(config):
         while not all(dones):
 
             c_idx, chosen_strings, state_representation = agent.generate_one_command(input_description, epsilon=epsilon)
-            obs, rewards, dones, infos = env.step(chosen_strings)
+            old_scores = scores
+            obs, scores, dones, infos = env.step(chosen_strings)
+            
+            # calculate immediate reward from scores and normalize it
+            rewards = (np.array(scores) - old_scores) / max_scores
+            rewards = np.array(rewards, dtype=np.float32)
             
             training_steps += sum([int(not finished) for finished in dones])
             
@@ -197,6 +207,7 @@ def train(config):
             agent.rewards.append(rewards)
             agent.dones.append(dones)
             agent.intermediate_rewards.append(infos["intermediate_reward"])
+            agent.scores.append(scores)
             # computer rewards, and push into replay memory
             rewards_np, rewards, mask_np, mask = agent.compute_reward(revisit_counting_lambda=revisit_counting_lambda, revisit_counting=revisit_counting)
 
@@ -238,6 +249,8 @@ def train(config):
         reward_avg.add(agent.final_rewards.mean())
         step_avg.add(agent.step_used_before_done.mean())
         loss_avg.add(avg_loss_in_this_game)
+        score_avg.add(agent.final_scores.mean())
+        
         # annealing
         if epoch < epsilon_anneal_epochs:
             epsilon -= (epsilon_anneal_from - epsilon_anneal_to) / float(epsilon_anneal_epochs)
@@ -254,10 +267,14 @@ def train(config):
         summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
         summary.add_scalar('loss_avg', loss_avg.value, training_steps)
         summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
+        summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
+        summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
 
-        msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
+
+        msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
         msg = msg.format(epoch, training_steps,
                          np.mean(reward_avg.value), agent.final_rewards.mean(), agent.final_intermediate_rewards.mean(), agent.final_counting_rewards.mean(),
+                         score_avg.value / max_scores[0], agent.final_scores.mean() / max_scores[0],
                          np.mean(step_avg.value), agent.step_used_before_done.mean(),
                          np.mean(loss_avg.value), avg_loss_in_this_game,
                          epsilon, revisit_counting_lambda)
