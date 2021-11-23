@@ -11,6 +11,7 @@ general:
   experiments_dir: 'experiments/lstm_drqn'
   use_cuda: True  # disable this when running on machine without cuda
   provide_prev_action: True
+  max_episode_steps: 50
 
   # replay memory
   history_size: 8

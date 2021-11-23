@@ -66,11 +66,12 @@ def train(config):
     
     requested_infos = request_infos()
     game_files = config['general']['game_files']
+    max_episode_steps = config['general']['max_episode_steps'] if 'max_episode_steps' in config['general'] else 50 # default in original paper
     env_id = textworld.gym.register_games(game_files,
                                           requested_infos,
                                           batch_size=batch_size,
                                           asynchronous=True, auto_reset=False,
-                                          max_episode_steps=50, # used in the original implementation
+                                          max_episode_steps=max_episode_steps,
                                           name="training")
     env = gym.make(env_id)
     env.seed(config['general']['random_seed'])

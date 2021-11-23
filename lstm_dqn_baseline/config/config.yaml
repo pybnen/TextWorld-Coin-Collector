@@ -11,7 +11,8 @@ general:
   experiments_dir: 'experiments/lstm_dqn'
   use_cuda: True  # disable this when running on machine without cuda
   provide_prev_action: True
-
+  max_episode_steps: 50
+  
   # replay memory
   replay_memory_capacity: 500000
   replay_memory_priority_fraction: 0.25  # 0.0 to disable this
