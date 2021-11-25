@@ -6,6 +6,8 @@ import warnings
 import yaml
 from os.path import join as pjoin
 import sys
+import time
+
 sys.path.append(sys.path[0] + "/..")
 
 import torch
@@ -151,6 +153,7 @@ def train(config):
     old_training_steps = 0
     epoch = 0
     
+    start_time = time.time()
     with tqdm(range(1, max_training_steps + 1)) as pbar:
         while training_steps < max_training_steps:
             agent.model.train()
@@ -292,6 +295,8 @@ def train(config):
                 "loss": np.mean(loss_avg.value)})
                
             epoch += 1
+            
+    print("Done, execution time: {}sec.".format(time.time() - start_time))
 
 
 if __name__ == '__main__':
