@@ -6,6 +6,8 @@ import warnings
 import yaml
 from os.path import join as pjoin
 import sys
+import time
+
 sys.path.append(sys.path[0] + "/..")
 
 import torch
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 import gym
 import textworld
 import textworld.gym
+
+from tqdm import tqdm
 
 
 def request_infos():
@@ -147,151 +151,167 @@ def train(config):
     
     max_training_steps = config['training']['scheduling']['training_steps']
     training_steps = 0
+    old_training_steps = 0
     epoch = 0
     
-    while training_steps < max_training_steps:
-    # for epoch in range(config['training']['scheduling']['epoch']):
-        agent.model.train()
-        obs, infos = env.reset()
-        agent.reset(infos)
-        print_command_string, print_rewards = [[] for _ in obs], [[] for _ in obs]
-        print_interm_rewards = [[] for _ in obs]
-        print_rc_rewards = [[] for _ in obs]
-
-        dones = [False] * batch_size
-        rewards = None
-        avg_loss_in_this_game = []
-        
-        scores = np.array([0] * len(obs))
-        max_scores = np.array(infos["max_score"])
-
-        curr_observation_strings = agent.get_observation_strings(infos)
-        if revisit_counting:
-            agent.reset_binarized_counter(batch_size)
-            revisit_counting_rewards = agent.get_binarized_count(curr_observation_strings)
-
-        current_game_step = 0
-        prev_actions = ["" for _ in range(batch_size)] if provide_prev_action else None
-        input_description, description_id_list = agent.get_game_step_info(obs, infos, prev_actions)
-        curr_ras_hidden, curr_ras_cell = None, None  # ras: recurrent action scorer
-        memory_cache = [[] for _ in range(batch_size)]
-        solved = [0 for _ in range(batch_size)]
-
-        while not all(dones):
+    start_time = time.time()
+    with tqdm(range(1, max_training_steps + 1)) as pbar:
+        while training_steps < max_training_steps:
             agent.model.train()
-            c_idx, chosen_strings, curr_ras_hidden, curr_ras_cell = agent.generate_one_command(input_description, curr_ras_hidden, curr_ras_cell, epsilon=epsilon)
-            old_scores = scores
-            obs, scores, dones, infos = env.step(chosen_strings)
+            obs, infos = env.reset()
+            agent.reset(infos)
+            print_command_string, print_rewards = [[] for _ in obs], [[] for _ in obs]
+            print_interm_rewards = [[] for _ in obs]
+            print_rc_rewards = [[] for _ in obs]
+
+            dones = [False] * batch_size
+            rewards = None
+            avg_loss_in_this_game = []
             
-            # calculate immediate reward from scores and normalize it
-            rewards = (np.array(scores) - old_scores) / max_scores
-            rewards = np.array(rewards, dtype=np.float32)
-            
-            training_steps += sum([int(not finished) for finished in dones])
-            
+            scores = np.array([0] * len(obs))
+            max_scores = np.array(infos["max_score"])
+
             curr_observation_strings = agent.get_observation_strings(infos)
-            if provide_prev_action:
-                prev_actions = chosen_strings
-            # counting
             if revisit_counting:
-                revisit_counting_rewards = agent.get_binarized_count(curr_observation_strings, update=True)
-            else:
-                revisit_counting_rewards = [0.0 for b in range(batch_size)]
-            agent.revisit_counting_rewards.append(revisit_counting_rewards)
-            revisit_counting_rewards = [float(format(item, ".3f")) for item in revisit_counting_rewards]
+                agent.reset_binarized_counter(batch_size)
+                revisit_counting_rewards = agent.get_binarized_count(curr_observation_strings)
 
-            for i in range(len(obs)):
-                print_command_string[i].append(chosen_strings[i])
-                print_rewards[i].append(rewards[i])
-                print_interm_rewards[i].append(infos["intermediate_reward"][i])
-                print_rc_rewards[i].append(revisit_counting_rewards[i])
-            if type(dones) is bool:
-                dones = [dones] * batch_size
-            agent.rewards.append(rewards)
-            agent.dones.append(dones)
-            agent.intermediate_rewards.append(infos["intermediate_reward"])
-            agent.scores.append(scores)
-            # computer rewards, and push into replay memory
-            rewards_np, rewards_pt, mask_np, mask_pt, memory_mask = agent.compute_reward(revisit_counting_lambda=revisit_counting_lambda, revisit_counting=revisit_counting)
-
-            curr_description_id_list = description_id_list
+            current_game_step = 0
+            prev_actions = ["" for _ in range(batch_size)] if provide_prev_action else None
             input_description, description_id_list = agent.get_game_step_info(obs, infos, prev_actions)
+            curr_ras_hidden, curr_ras_cell = None, None  # ras: recurrent action scorer
+            memory_cache = [[] for _ in range(batch_size)]
+            solved = [0 for _ in range(batch_size)]
 
-            for b in range(batch_size):
-                if memory_mask[b] == 0:
-                    continue
-                if dones[b] == 1 and rewards[b] == 0:
-                    # last possible step
-                    is_final = True
+            while not all(dones):
+                agent.model.train()
+                c_idx, chosen_strings, curr_ras_hidden, curr_ras_cell = agent.generate_one_command(input_description, curr_ras_hidden, curr_ras_cell, epsilon=epsilon)
+                old_scores = scores
+                obs, scores, dones, infos = env.step(chosen_strings)
+                
+                # calculate immediate reward from scores and normalize it
+                rewards = (np.array(scores) - old_scores) / max_scores
+                rewards = np.array(rewards, dtype=np.float32)
+                
+                training_steps += sum([int(not finished) for finished in dones])
+                
+                curr_observation_strings = agent.get_observation_strings(infos)
+                if provide_prev_action:
+                    prev_actions = chosen_strings
+                # counting
+                if revisit_counting:
+                    revisit_counting_rewards = agent.get_binarized_count(curr_observation_strings, update=True)
                 else:
-                    is_final = mask_np[b] == 0
-                if rewards[b] > 0.0:
-                    solved[b] = 1
-                # replay memory
-                memory_cache[b].append((curr_description_id_list[b], c_idx[b], rewards_pt[b], mask_pt[b], dones[b], is_final, curr_observation_strings[b]))
+                    revisit_counting_rewards = [0.0 for b in range(batch_size)]
+                agent.revisit_counting_rewards.append(revisit_counting_rewards)
+                revisit_counting_rewards = [float(format(item, ".3f")) for item in revisit_counting_rewards]
 
-            if current_game_step > 0 and current_game_step % config["general"]["update_per_k_game_steps"] == 0:
-                policy_loss = agent.update(replay_batch_size, history_size, update_from, discount_gamma=discount_gamma)
-                if policy_loss is None:
-                    continue
-                loss = policy_loss
-                # Backpropagate
-                optimizer.zero_grad()
-                loss.backward(retain_graph=True)
-                # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-                torch.nn.utils.clip_grad_norm_(agent.model.parameters(), config['training']['optimizer']['clip_grad_norm'])
-                optimizer.step()  # apply gradients
-                avg_loss_in_this_game.append(to_np(policy_loss))
-            current_game_step += 1
+                for i in range(len(obs)):
+                    print_command_string[i].append(chosen_strings[i])
+                    print_rewards[i].append(rewards[i])
+                    print_interm_rewards[i].append(infos["intermediate_reward"][i])
+                    print_rc_rewards[i].append(revisit_counting_rewards[i])
+                    
+                if type(dones) is bool:
+                    dones = [dones] * batch_size
+                
+                agent.rewards.append(rewards)
+                agent.dones.append(dones)
+                agent.intermediate_rewards.append(infos["intermediate_reward"])
+                agent.scores.append(scores)
+                # computer rewards, and push into replay memory
+                rewards_np, rewards_pt, mask_np, mask_pt, memory_mask = agent.compute_reward(revisit_counting_lambda=revisit_counting_lambda, revisit_counting=revisit_counting)
+
+                curr_description_id_list = description_id_list
+                input_description, description_id_list = agent.get_game_step_info(obs, infos, prev_actions)
+
+                for b in range(batch_size):
+                    if memory_mask[b] == 0:
+                        continue
+                    if dones[b] == 1 and rewards[b] == 0:
+                        # last possible step
+                        is_final = True
+                    else:
+                        is_final = mask_np[b] == 0
+                    if rewards[b] > 0.0:
+                        solved[b] = 1
+                    # replay memory
+                    memory_cache[b].append((curr_description_id_list[b], c_idx[b], rewards_pt[b], mask_pt[b], dones[b], is_final, curr_observation_strings[b]))
+
+                if current_game_step > 0 and current_game_step % config["general"]["update_per_k_game_steps"] == 0:
+                    policy_loss = agent.update(replay_batch_size, history_size, update_from, discount_gamma=discount_gamma)
+                    if policy_loss is None:
+                        continue
+                    loss = policy_loss
+                    # Backpropagate
+                    optimizer.zero_grad()
+                    loss.backward(retain_graph=True)
+                    # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
+                    torch.nn.utils.clip_grad_norm_(agent.model.parameters(), config['training']['optimizer']['clip_grad_norm'])
+                    optimizer.step()  # apply gradients
+                    avg_loss_in_this_game.append(to_np(policy_loss))
+                current_game_step += 1
+                
+                if training_steps >= max_training_steps:
+                    break
+
+            for i, mc in enumerate(memory_cache):
+                for item in mc:
+                    if replay_memory_priority_fraction == 0.0:
+                        # vanilla replay memory
+                        agent.replay_memory.push(*item)
+                    else:
+                        # prioritized replay memory
+                        agent.replay_memory.push(solved[i], *item)
+
+            agent.finish()
+            avg_loss_in_this_game = np.mean(avg_loss_in_this_game)
+            reward_avg.add(agent.final_rewards.mean())
+            step_avg.add(agent.step_used_before_done.mean())
+            loss_avg.add(avg_loss_in_this_game)
+            score_avg.add(agent.final_scores.mean())
             
-            if training_steps >= max_training_steps:
-                break
+            # annealing
+            if epoch < epsilon_anneal_epochs:
+                epsilon -= (epsilon_anneal_from - epsilon_anneal_to) / float(epsilon_anneal_epochs)
+            if epoch < revisit_counting_lambda_anneal_epochs:
+                revisit_counting_lambda -= (revisit_counting_lambda_anneal_from - revisit_counting_lambda_anneal_to) / float(revisit_counting_lambda_anneal_epochs)
 
-        for i, mc in enumerate(memory_cache):
-            for item in mc:
-                if replay_memory_priority_fraction == 0.0:
-                    # vanilla replay memory
-                    agent.replay_memory.push(*item)
-                else:
-                    # prioritized replay memory
-                    agent.replay_memory.push(solved[i], *item)
+            # Tensorboard logging #
+            # (1) Log some numbers
+            summary.add_scalar('avg_reward', reward_avg.value, training_steps)
+            summary.add_scalar('curr_reward', agent.final_rewards.mean(), training_steps)
+            summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), training_steps)
+            summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), training_steps)
+            summary.add_scalar('avg_step', step_avg.value, training_steps)
+            summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
+            summary.add_scalar('loss_avg', loss_avg.value, training_steps)
+            summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
+            summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
+            summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
+            summary.add_scalar('epsilon', epsilon, training_steps)
 
-        agent.finish()
-        avg_loss_in_this_game = np.mean(avg_loss_in_this_game)
-        reward_avg.add(agent.final_rewards.mean())
-        step_avg.add(agent.step_used_before_done.mean())
-        loss_avg.add(avg_loss_in_this_game)
-        score_avg.add(agent.final_scores.mean())
-        
-        # annealing
-        if epoch < epsilon_anneal_epochs:
-            epsilon -= (epsilon_anneal_from - epsilon_anneal_to) / float(epsilon_anneal_epochs)
-        if epoch < revisit_counting_lambda_anneal_epochs:
-            revisit_counting_lambda -= (revisit_counting_lambda_anneal_from - revisit_counting_lambda_anneal_to) / float(revisit_counting_lambda_anneal_epochs)
-
-        # Tensorboard logging #
-        # (1) Log some numbers
-        summary.add_scalar('avg_reward', reward_avg.value, training_steps)
-        summary.add_scalar('curr_reward', agent.final_rewards.mean(), training_steps)
-        summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), training_steps)
-        summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), training_steps)
-        summary.add_scalar('avg_step', step_avg.value, training_steps)
-        summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
-        summary.add_scalar('loss_avg', loss_avg.value, training_steps)
-        summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
-        summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
-        summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
-        summary.add_scalar('epsilon', epsilon, training_steps)
-
-        msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
-        msg = msg.format(epoch, training_steps,
-                         np.mean(reward_avg.value), agent.final_rewards.mean(), agent.final_intermediate_rewards.mean(), agent.final_counting_rewards.mean(),
-                         score_avg.value / max_scores[0], agent.final_scores.mean() / max_scores[0],
-                         np.mean(step_avg.value), agent.step_used_before_done.mean(),
-                         np.mean(loss_avg.value), avg_loss_in_this_game,
-                         epsilon, revisit_counting_lambda)
-        print(msg)
-        epoch += 1
+            msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
+            msg = msg.format(epoch, training_steps,
+                            np.mean(reward_avg.value), agent.final_rewards.mean(), agent.final_intermediate_rewards.mean(), agent.final_counting_rewards.mean(),
+                            score_avg.value / max_scores[0], agent.final_scores.mean() / max_scores[0],
+                            np.mean(step_avg.value), agent.step_used_before_done.mean(),
+                            np.mean(loss_avg.value), avg_loss_in_this_game,
+                            epsilon, revisit_counting_lambda)
+            # print(msg)
+            
+            pbar.update(n=training_steps - old_training_steps)
+            old_training_steps = training_steps
+            pbar.set_postfix({
+                "epoch": epoch,
+                "eps": epsilon,
+                "score": score_avg.value / max_scores[0],
+                "steps": np.mean(step_avg.value),
+                "loss": np.mean(loss_avg.value)})
+            
+            epoch += 1
+            
+    print("Done, execution time: {}sec.".format(time.time() - start_time))
 
 if __name__ == '__main__':
     for _p in ['saved_models']:
