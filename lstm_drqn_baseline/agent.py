@@ -69,18 +69,44 @@ class PrioritizedReplayMemory(object):
         self.alpha_memory, self.beta_memory = [], []
         self.alpha_position, self.beta_position = 0, 0
 
+        self.stats = {"reward_mean": 0.0, "reward_total": 0.0,
+                      "timeout": 0, "tries_mean": 0, "tries_total": 0, "n_sampled": 0,
+                      "sampled_reward": 0.0, "sampled_done_cnt": 0, "sampled_reward_cnt": {}}
+        
+    def reset_stats(self):
+        self.stats["sampled_reward"] = 0.0
+        self.stats["sampled_done_cnt"] = 0
+        self.stats["sampled_reward_cnt"] = {}
+        self.stats["timeout"] = 0
+        self.stats["tries_mean"] = 0
+        self.stats["n_sampled"] = 0
+
     def push(self, is_prior=False, *args):
         """Saves a transition."""
+        
+        reward_total = self.stats["reward_total"] + args[2].item()
+        
         if is_prior:
             if len(self.alpha_memory) < self.alpha_capacity:
                 self.alpha_memory.append(None)
+            else:
+                reward_total -= self.alpha_memory[self.alpha_position].reward.item()
+                
             self.alpha_memory[self.alpha_position] = Transition(*args)
             self.alpha_position = (self.alpha_position + 1) % self.alpha_capacity
         else:
             if len(self.beta_memory) < self.beta_capacity:
                 self.beta_memory.append(None)
+            else:
+                reward_total -= self.beta_memory[self.beta_position].reward.item()
+                
             self.beta_memory[self.beta_position] = Transition(*args)
             self.beta_position = (self.beta_position + 1) % self.beta_capacity
+        
+        # update statistic
+        self.stats["reward_total"] = reward_total
+        self.stats["reward_mean"] = reward_total / len(self)
+
 
     def _get_batch(self, batch_size, history_size, which_memory):
         if len(which_memory) <= history_size:
@@ -90,12 +116,17 @@ class PrioritizedReplayMemory(object):
         while len(res) < batch_size:
             tried_times += 1
             if tried_times >= 500:
+                self.stats["timeout"] += 1
                 break
             idx = np.random.randint(history_size - 1, len(which_memory) - 1)
             # only last frame can be (is_final == True)
             if np.any([item.is_final for item in which_memory[idx - (history_size - 1): idx]]):
                 continue
             res.append(which_memory[idx - (history_size - 1): idx + 1])
+            
+        self.stats["n_sampled"] += 1
+        self.stats["tries_total"] += tried_times
+        self.stats["tries_mean"] = self.stats["tries_total"] / self.stats["n_sampled"]
 
         if len(res) == 0:
             return None
@@ -113,6 +144,17 @@ class PrioritizedReplayMemory(object):
             res += res_alpha
         if res_beta is not None:
             res += res_beta
+            
+        self.stats["sampled_reward"] += np.sum([seq[-1].reward.item() for seq in res])
+        self.stats["sampled_done_cnt"] += np.sum([seq[-1].done for seq in res])
+        for seq in res:
+            rew = seq[-1].reward.item()
+            if rew != 0.0:
+                if rew not in self.stats["sampled_reward_cnt"]:
+                    self.stats["sampled_reward_cnt"][rew] = 1
+                else:
+                    self.stats["sampled_reward_cnt"][rew] += 1
+                    
         random.shuffle(res)
         res = list(map(list, zip(*res)))  # list (history size) of list (batch) of tuples
         return res

@@ -333,10 +333,13 @@ class RLAgent(object):
         count_rewards = []
         for i in range(batch_size):
             concat_string = observation_strings[i]
+            
             if concat_string not in self.binarized_counter_dict[i]:
                 self.binarized_counter_dict[i][concat_string] = 0.0
+                
             if update:
                 self.binarized_counter_dict[i][concat_string] += 1.0
+            
             r = self.binarized_counter_dict[i][concat_string]
             r = float(r == 1.0)
             count_rewards.append(r)

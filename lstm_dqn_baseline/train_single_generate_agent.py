@@ -207,6 +207,7 @@ def train(config):
                     print_rewards[i].append(rewards[i])
                     print_interm_rewards[i].append(infos["intermediate_reward"][i])
                     print_rc_rewards[i].append(revisit_counting_rewards[i])
+                    
                 if type(dones) is bool:
                     dones = [dones] * batch_size
                 agent.rewards.append(rewards)

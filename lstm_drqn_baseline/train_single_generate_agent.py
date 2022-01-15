@@ -281,15 +281,40 @@ def train(config):
             # (1) Log some numbers
             summary.add_scalar('avg_reward', reward_avg.value, training_steps)
             summary.add_scalar('curr_reward', agent.final_rewards.mean(), training_steps)
+            
             summary.add_scalar('curr_interm_reward', agent.final_intermediate_rewards.mean(), training_steps)
             summary.add_scalar('curr_counting_reward', agent.final_counting_rewards.mean(), training_steps)
+            
             summary.add_scalar('avg_step', step_avg.value, training_steps)
             summary.add_scalar('curr_step', agent.step_used_before_done.mean(), training_steps)
-            summary.add_scalar('loss_avg', loss_avg.value, training_steps)
+            
+            summary.add_scalar('avg_loss', loss_avg.value, training_steps)
             summary.add_scalar('curr_loss', avg_loss_in_this_game, training_steps)
+            
             summary.add_scalar('avg_score', score_avg.value / max_scores[0], training_steps)
             summary.add_scalar('curr_score', agent.final_scores.mean() / max_scores[0], training_steps)
+            
             summary.add_scalar('epsilon', epsilon, training_steps)
+            
+            # replay buffer
+            summary.add_scalar("replay_buffer/mean_reward",
+                               agent.replay_memory.stats["reward_mean"], global_step=training_steps)
+
+            summary.add_scalar("replay_buffer/timeout",
+                               agent.replay_memory.stats["timeout"], global_step=training_steps)
+            summary.add_scalar("replay_buffer/tries_mean",
+                               agent.replay_memory.stats["tries_mean"], global_step=training_steps)
+            summary.add_scalar("replay_buffer/n_sampled",
+                               agent.replay_memory.stats["n_sampled"], global_step=training_steps)
+
+            summary.add_scalar("replay_buffer/sampled_reward",
+                               agent.replay_memory.stats["sampled_reward"], global_step=training_steps)
+            summary.add_scalar("replay_buffer/sampled_done_cnt",
+                               agent.replay_memory.stats["sampled_done_cnt"], global_step=training_steps)
+            for r, c in agent.replay_memory.stats["sampled_reward_cnt"].items():
+                summary.add_scalar("replay_buffer/sampled_cnt_{:.2f}".format(r),
+                                   c, global_step=training_steps)
+            agent.replay_memory.reset_stats()
 
             msg = 'E#{:03d}, TS#{}, R={:.3f}/{:.3f}/IR{:.3f}/CR{:.3f}, Score={:.3f}/{:.3f}, S={:.3f}/{:.3f}, L={:.3f}/{:.3f}, epsilon={:.4f}, lambda_counting={:.4f}'
             msg = msg.format(epoch, training_steps,
