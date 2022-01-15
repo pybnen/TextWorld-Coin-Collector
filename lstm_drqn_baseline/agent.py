@@ -78,6 +78,7 @@ class PrioritizedReplayMemory(object):
         self.stats["sampled_done_cnt"] = 0
         self.stats["sampled_reward_cnt"] = {}
         self.stats["timeout"] = 0
+        self.stats["tries_total"] = 0
         self.stats["tries_mean"] = 0
         self.stats["n_sampled"] = 0
 
